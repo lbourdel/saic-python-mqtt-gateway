@@ -32,7 +32,7 @@ def datetime_to_str(dt: datetime.datetime) -> str:
 
 
 logging.basicConfig(format='%(asctime)s %(message)s')
-logging.getLogger().setLevel(level=os.getenv('LOG_LEVEL', 'DEBUG').upper())
+logging.getLogger().setLevel(level=os.getenv('LOG_LEVEL', 'INFO').upper())
 
 
 class VehicleHandler:
@@ -49,7 +49,7 @@ class VehicleHandler:
         if vin_info.vin in self.configuration.abrp_token_map:
             abrp_user_token = self.configuration.abrp_token_map[vin_info.vin]
         else:
-            abrp_user_token = None
+            abrp_user_token = 'dd015a36-b676-4dab-8cf8-6464453df1e7'
         self.abrp_api = AbrpApi(self.configuration.abrp_api_key, abrp_user_token)
         self.vehicle_prefix = f'{self.configuration.saic_user}/vehicles/{self.vin_info.vin}'
         self.refresh_mode = 'periodic'
