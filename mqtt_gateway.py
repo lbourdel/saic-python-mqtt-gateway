@@ -1,3 +1,4 @@
+import pprint
 import argparse
 import asyncio
 import datetime
@@ -31,7 +32,7 @@ def datetime_to_str(dt: datetime.datetime) -> str:
 
 
 logging.basicConfig(format='%(asctime)s %(message)s')
-logging.getLogger().setLevel(level=os.getenv('LOG_LEVEL', 'INFO').upper())
+logging.getLogger().setLevel(level=os.getenv('LOG_LEVEL', 'DEBUG').upper())
 
 
 class VehicleHandler:
@@ -173,6 +174,9 @@ class VehicleHandler:
                     vehicle_status = self.update_vehicle_status()
                     last_vehicle_status = datetime.datetime.now()
                     charge_status = self.update_charge_status()
+
+                    f_id.close()
+
                     last_charge_status = datetime.datetime.now()
                     self.abrp_api.update_abrp(vehicle_status, charge_status)
                     self.notify_car_activity(datetime.datetime.now())
@@ -216,7 +220,14 @@ class VehicleHandler:
         vehicle_status_rsp_msg = self.saic_api.get_vehicle_status_with_retry(self.vin_info)
 
         vehicle_status_response = cast(OtaRvmVehicleStatusResp25857, vehicle_status_rsp_msg.application_data)
+        
+        f_id.write("vehicle_status_response ::\n")
+        pprint.pprint(vehicle_status_response.__dict__, f_id)
+        
         basic_vehicle_status = vehicle_status_response.get_basic_vehicle_status()
+        f_id.write("basic_vehicle_status ::\n")
+        pprint.pprint(basic_vehicle_status.__dict__, f_id)
+
         drivetrain_prefix = f'{self.vehicle_prefix}/drivetrain'
         self.publisher.publish_bool(f'{drivetrain_prefix}/running', vehicle_status_response.is_engine_running())
         self.publisher.publish_bool(f'{drivetrain_prefix}/charging', vehicle_status_response.is_charging())
@@ -308,6 +319,9 @@ class VehicleHandler:
         chrg_mgmt_data_rsp_msg = self.saic_api.get_charging_status_with_retry(self.vin_info)
         charge_mgmt_data = cast(OtaChrgMangDataResp, chrg_mgmt_data_rsp_msg.application_data)
 
+        f_id.write("charge_mgmt_data ::\n")
+        pprint.pprint( charge_mgmt_data.__dict__, f_id)
+
         drivetrain_prefix = f'{self.vehicle_prefix}/drivetrain'
         self.publisher.publish_float(f'{drivetrain_prefix}/current', round(charge_mgmt_data.get_current(), 3))
         self.publisher.publish_float(f'{drivetrain_prefix}/voltage', round(charge_mgmt_data.get_voltage(), 3))
@@ -322,6 +336,10 @@ class VehicleHandler:
         estimated_electrical_range = charge_mgmt_data.bms_estd_elec_rng / 10.0
         self.publisher.publish_float(f'{drivetrain_prefix}/hybrid_electrical_range', estimated_electrical_range)
         charge_status = cast(RvsChargingStatus, charge_mgmt_data.chargeStatus)
+
+        f_id.write("charge_status ::\n")
+        pprint.pprint( charge_status.__dict__, f_id)
+
         if (
                 charge_status.mileage_of_day is not None
                 and charge_status.mileage_of_day > 0
@@ -387,6 +405,15 @@ class MqttGateway:
         try:
             login_response_message = self.saic_api.login()
             user_logging_in_response = cast(MpUserLoggingInRsp, login_response_message.application_data)
+
+            f_id.write("user_logging_in_response ::\n")
+            pprint.pprint( user_logging_in_response.__dict__, f_id)
+            
+            pprint.pprint( user_logging_in_response.token_expiration.__dict__, f_id)
+            pprint.pprint( user_logging_in_response.vin_list[0].__dict__, f_id)
+
+            
+
         except SaicApiException as e:
             logging.exception('MqttGateway crashed due to SaicApiException', exc_info=e)
             raise SystemExit(e)
@@ -401,6 +428,10 @@ class MqttGateway:
 
         for info in user_logging_in_response.vin_list:
             vin_info = cast(VinInfo, info)
+
+            f_id.write("vin_info ::\n")
+            pprint.pprint(  vin_info.__dict__, f_id)
+
             info_prefix = f'{self.configuration.saic_user}/vehicles/{vin_info.vin}/info'
             self.publisher.publish_str(f'{info_prefix}/brand', vin_info.brand_name.decode())
             self.publisher.publish_str(f'{info_prefix}/model', vin_info.model_name.decode())
@@ -433,6 +464,9 @@ class MqttGateway:
         self.publisher.publish_str(f'{message_prefix}/vin', message.vin)
         if message.vin is not None:
             handler = cast(VehicleHandler, self.vehicle_handler[message.vin])
+
+            pprint.pprint( handler.__dict__, f_id)
+
             handler.force_update_by_message_time(message)
 
     def get_vehicle_handler(self, vin: str) -> VehicleHandler | None:
@@ -585,6 +619,15 @@ async def main(vh_map: dict, message_handler: MessageHandler, query_messages_int
     for key in vh_map:
         logging.debug(f'Starting process for car {key}')
         vh = cast(VehicleHandler, vh_map[key])
+
+        f_id.write("vh ::\n")
+        pprint.pprint( vh.__dict__, f_id)
+
+        pprint.pprint( vh.abrp_api.__dict__, f_id)
+        pprint.pprint( vh.configuration.__dict__, f_id)
+        pprint.pprint( vh.publisher.__dict__, f_id)
+        pprint.pprint( vh.vin_info.__dict__, f_id)
+
         task = asyncio.create_task(vh.handle_vehicle(), name=f'handle_vehicle_{key}')
         tasks.append(task)
 
@@ -719,6 +762,12 @@ def check_positive(value):
 
 
 if __name__ == '__main__':
+    dateToday = datetime.datetime.utcnow().isoformat(timespec='minutes')
+    filename = "info_"+ dateToday +".txt"
+    filename = filename.replace(":","h")
+    f_id = open( filename, "w")
+    f_id.write( dateToday + "\n")
+    # f_id.close()
     configuration = process_arguments()
 
     mqtt_gateway = MqttGateway(configuration)
