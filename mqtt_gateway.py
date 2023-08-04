@@ -40,7 +40,8 @@ def datetime_to_str(dt: datetime.datetime) -> str:
 
 logging.basicConfig(format='%(asctime)s %(message)s')
 LOG = logging.getLogger(__name__)
-LOG.setLevel(level=os.getenv('LOG_LEVEL', 'INFO').upper())
+# LBR
+LOG.setLevel(level=os.getenv('LOG_LEVEL', 'WARNING').upper())
 
 
 class VehicleHandler:
@@ -262,6 +263,7 @@ class MqttGateway:
         self.saic_api = SaicApi(config.saic_uri, config.saic_user, config.saic_password, config.saic_relogin_delay)
         self.saic_api.on_publish_json_value = self.__on_publish_json_value
         self.saic_api.on_publish_raw_value = self.__on_publish_raw_value
+        # LBR comment to not publish to MQTT
         self.publisher.connect()
 
     def run(self):

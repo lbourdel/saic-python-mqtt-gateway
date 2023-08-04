@@ -110,6 +110,8 @@ class VehicleState:
         if exterior_temperature > -128:
             self.publisher.publish_int(self.get_topic(mqtt_topics.CLIMATE_EXTERIOR_TEMPERATURE), exterior_temperature)
         battery_voltage = basic_vehicle_status.battery_voltage / 10.0
+        # LBR
+        LOG.warn(f'LBR battery_voltage : {battery_voltage}')
         self.publisher.publish_float(self.get_topic(mqtt_topics.DRIVETRAIN_AUXILIARY_BATTERY_VOLTAGE), battery_voltage)
 
         way_point = vehicle_status.get_gps_position().get_way_point()
@@ -196,6 +198,8 @@ class VehicleState:
             self.publisher.publish_float(self.get_topic(mqtt_topics.DRIVETRAIN_MILEAGE), mileage)
         if basic_vehicle_status.fuel_range_elec > 0:
             electric_range = basic_vehicle_status.fuel_range_elec / 10.0
+            # LBR
+            LOG.warn(f'LBR electric_range : {electric_range}')
             self.publisher.publish_float(self.get_topic(mqtt_topics.DRIVETRAIN_RANGE), electric_range)
 
         self.publisher.publish_str(self.get_topic(mqtt_topics.REFRESH_LAST_VEHICLE_STATE),
@@ -377,6 +381,8 @@ class VehicleState:
 
         soc = charge_mgmt_data.bmsPackSOCDsp / 10.0
         if soc <= 100.0:
+            # LBR
+            LOG.warn(f'LBR soc : {soc}')
             self.publisher.publish_float(self.get_topic(mqtt_topics.DRIVETRAIN_SOC), soc)
             if self.wallbox_soc_topic:
                 self.publisher.publish_int(self.wallbox_soc_topic, int(soc), True)
