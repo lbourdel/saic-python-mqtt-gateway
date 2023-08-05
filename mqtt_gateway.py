@@ -263,8 +263,9 @@ class MqttGateway:
         self.saic_api = SaicApi(config.saic_uri, config.saic_user, config.saic_password, config.saic_relogin_delay)
         self.saic_api.on_publish_json_value = self.__on_publish_json_value
         self.saic_api.on_publish_raw_value = self.__on_publish_raw_value
-        # LBR comment to not publish to MQTT
-        # self.publisher.connect()
+        # LBR tesst to not publish to MQTT
+        if self.configuration.mqtt_host != '0.0.0.0':
+            self.publisher.connect()
 
     def run(self):
         try:

@@ -9,8 +9,8 @@
             "type": "python",
             "request": "launch",
             "program": "${file}",
-            "args": ["-mtcp://192.168.1.14:1883", "-u=login",  "-p=pwd",
-            "--abrp-user-token=c643355d-64c2-46af-8212-6584c55c3a80"],
+            "args": ["-mtcp://0.0.0.0:1883", "-u=abrp-login","-p=abrp-pwd","--ha-discovery=false", \
+            "--saic-relogin-delay=900","--abrp-user-token=LSJWH4092PN041198=c3718971-380d-4468-8597-5505af2d9414"],
             "console": "integratedTerminal",
             "justMyCode": true
         }
