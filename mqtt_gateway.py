@@ -264,7 +264,7 @@ class MqttGateway:
         self.saic_api.on_publish_json_value = self.__on_publish_json_value
         self.saic_api.on_publish_raw_value = self.__on_publish_raw_value
         # LBR comment to not publish to MQTT
-        self.publisher.connect()
+        # self.publisher.connect()
 
     def run(self):
         try:
