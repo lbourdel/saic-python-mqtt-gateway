@@ -74,8 +74,7 @@ class VehicleHandler:
                 'cred.json', scopes)
         client = gspread.authorize(creds)
         self.sheet = client.open('test-abrp').sheet1
-        self.data = {'utc': int(time.time()) # We assume the timestamp is now, we will update it later from GPS if available
-                     }
+        self.data = {  }
 
     def update_mysheet(self, data):
         abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(2;0;0)''']
@@ -130,6 +129,7 @@ class VehicleHandler:
                     charge_status = self.update_charge_status()
             # LBR
                     self.data.update( {
+                        'utc': int(time.time()), # We assume the timestamp is now, we will update it later from GPS if available
                         'is_charging': vehicle_status.is_charging(),
                         'is_parked': vehicle_status.is_parked(),
 
