@@ -43,6 +43,13 @@ LOG = logging.getLogger(__name__)
 # LBR
 LOG.setLevel(level=os.getenv('LOG_LEVEL', 'WARNING').upper())
 
+# LBR
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import google.auth
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+# END
 
 class VehicleHandler:
     def __init__(self, config: Configuration, saicapi: SaicApi, publisher: Publisher, vin_info: VinInfo,
@@ -59,6 +66,30 @@ class VehicleHandler:
         else:
             abrp_user_token = None
         self.abrp_api = AbrpApi(self.configuration.abrp_api_key, abrp_user_token)
+# LBR
+        scopes = ['https://www.googleapis.com/auth/spreadsheets',
+                "https://www.googleapis.com/auth/drive.file",
+                "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+                'cred.json', scopes)
+        client = gspread.authorize(creds)
+        self.sheet = client.open('test-abrp').sheet1
+        self.data = {'utc': int(time.time()) # We assume the timestamp is now, we will update it later from GPS if available
+                     }
+
+    def update_mysheet(self, data):
+        abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(2;0;0)''']
+
+        dict = ['utc', 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'heading', 'lat', 'lon', 'elevation', 'battery_voltage']
+        for dico in dict:
+            if dico in data:
+                # print(dico, data[dico])
+                abrp.append(data[dico])
+            else:
+                abrp.append('')
+
+        self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
+# END
 
     def update_front_window_heat_state(self, front_window_heat_state: str):
         result_key = f'{self.vehicle_prefix}/climate/frontWindowDefrosterHeating/result'
@@ -97,6 +128,32 @@ class VehicleHandler:
                 try:
                     vehicle_status = self.update_vehicle_status()
                     charge_status = self.update_charge_status()
+            # LBR
+                    self.data.update( {
+                        'is_charging': vehicle_status.is_charging(),
+                        'is_parked': vehicle_status.is_parked(),
+
+                        'soc': (charge_status.bmsPackSOCDsp / 10.0),
+                        'power': int(charge_status.get_power()),
+                        'voltage': int(charge_status.get_voltage()),
+                        'current': int(charge_status.get_current()),
+
+                        'ext_temp':vehicle_status.basic_vehicle_status.exterior_temperature,
+                        'odometer':vehicle_status.basic_vehicle_status.mileage / 10.0,
+                        'speed':vehicle_status.get_gps_position().get_way_point().speed / 10.0,
+                        'est_battery_range':float(vehicle_status.basic_vehicle_status.fuel_range_elec) / 10.0,
+                        'heading':vehicle_status.get_gps_position().get_way_point().heading,
+                        'battery_voltage':float(vehicle_status.basic_vehicle_status.battery_voltage) / 10.0,
+                        'lat':vehicle_status.get_gps_position().get_way_point().position.latitude / 1000000.000000,
+                        'lon':vehicle_status.get_gps_position().get_way_point().position.longitude / 1000000.000000,
+                        'elevation':vehicle_status.get_gps_position().get_way_point().position.altitude,
+
+                        'soc_kwh':charge_status.chargeStatus.real_time_power / 10.0,
+                        
+                            }  )
+                    
+                    self.update_mysheet(self.data)
+            # END
                     abrp_response = self.abrp_api.update_abrp(vehicle_status, charge_status)
                     self.publisher.publish_str(f'{self.vehicle_prefix}/{mqtt_topics.INTERNAL_ABRP}', abrp_response)
                     self.vehicle_state.mark_successful_refresh()
