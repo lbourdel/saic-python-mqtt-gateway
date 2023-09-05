@@ -87,7 +87,8 @@ class VehicleHandler:
             else:
                 abrp.append('')
 
-        self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
+        # self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
+        self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
 # END
 
     def update_front_window_heat_state(self, front_window_heat_state: str):
