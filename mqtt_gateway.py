@@ -78,17 +78,18 @@ class VehicleHandler:
 
     def update_mysheet(self, data):
         abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(2;0;0)''']
+        if 'est_battery_range' in data:
+            if data['est_battery_range']:
+                dict = ['utc', 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'heading', 'lat', 'lon', 'elevation', 'battery_voltage']
+                for dico in dict:
+                    if dico in data:
+                        # print(dico, data[dico])
+                        abrp.append(data[dico])
+                    else:
+                        abrp.append('')
 
-        dict = ['utc', 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'heading', 'lat', 'lon', 'elevation', 'battery_voltage']
-        for dico in dict:
-            if dico in data:
-                # print(dico, data[dico])
-                abrp.append(data[dico])
-            else:
-                abrp.append('')
-
-        # self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
-        self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
+                # self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
+                self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
 # END
 
     def update_front_window_heat_state(self, front_window_heat_state: str):
