@@ -53,7 +53,6 @@ logging.getLogger('apscheduler').setLevel(level=LOG_LEVEL)
 
 def debug_log_enabled():
     return LOG_LEVEL == 'DEBUG'
->>>>>>> 8eba0a30a2e2d0360397c75009ebb367ec1bfcf3
 
 # LBR
 import gspread
@@ -89,7 +88,7 @@ class VehicleHandler:
         self.data = {  }
 
     def update_mysheet(self, data):
-        abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(2;0;0)''']
+        abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(1;0;0)''']
         if 'est_battery_range' in data:
             if data['est_battery_range']:
                 dict = ['utc', 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'heading', 'lat', 'lon', 'elevation', 'battery_voltage']
