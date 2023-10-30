@@ -2,32 +2,37 @@ import argparse
 import asyncio
 import datetime
 import faulthandler
+import json
 import logging
 import os
 import signal
 import sys
 import time
 import urllib.parse
-from typing import cast
+from typing import Callable, cast
 
+import apscheduler.schedulers.asyncio
 import paho.mqtt.client as mqtt
+from saic_ismart_client.exceptions import SaicApiException
 
+from charging_station import ChargingStation
 from home_assistant_discovery import HomeAssistantDiscovery
 from saic_ismart_client.abrp_api import AbrpApi, AbrpApiException
-from saic_ismart_client.common_model import TargetBatteryCode
+from saic_ismart_client.common_model import TargetBatteryCode, ChargeCurrentLimitCode, ScheduledChargingMode
 from saic_ismart_client.ota_v1_1.data_model import VinInfo, MpUserLoggingInRsp, MpAlarmSettingType
 from saic_ismart_client.ota_v2_1.data_model import OtaRvmVehicleStatusResp25857
 from saic_ismart_client.ota_v3_0.data_model import OtaChrgMangDataResp
-from saic_ismart_client.saic_api import SaicApi, SaicApiException, create_alarm_switch
+from saic_ismart_client.saic_api import SaicApi, create_alarm_switch
 
 import mqtt_topics
 from Exceptions import MqttGatewayException
-from configuration import Configuration
+from configuration import Configuration, TransportProtocol
 from mqtt_publisher import MqttClient
 from publisher import Publisher
 from vehicle import RefreshMode, VehicleState
 
 MSG_CMD_SUCCESSFUL = 'Success'
+CHARGING_STATIONS_FILE = 'charging-stations.json'
 
 
 def epoch_value_to_str(time_value: int) -> str:
@@ -38,10 +43,17 @@ def datetime_to_str(dt: datetime.datetime) -> str:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
-logging.basicConfig(format='%(asctime)s %(message)s')
+logging.root.handlers = []
+logging.basicConfig(format='{asctime:s} [{levelname:^8s}] {message:s} - {name:s}', style='{')
 LOG = logging.getLogger(__name__)
-# LBR
-LOG.setLevel(level=os.getenv('LOG_LEVEL', 'WARNING').upper())
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'WARNING').upper()
+LOG.setLevel(level=LOG_LEVEL)
+logging.getLogger('apscheduler').setLevel(level=LOG_LEVEL)
+
+
+def debug_log_enabled():
+    return LOG_LEVEL == 'DEBUG'
+>>>>>>> 8eba0a30a2e2d0360397c75009ebb367ec1bfcf3
 
 # LBR
 import gspread
@@ -92,31 +104,12 @@ class VehicleHandler:
                 self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
 # END
 
-    def update_front_window_heat_state(self, front_window_heat_state: str):
-        result_key = f'{self.vehicle_prefix}/climate/frontWindowDefrosterHeating/result'
-        try:
-            if front_window_heat_state.lower() == 'on':
-                LOG.info('Front window heating will be switched on')
-                self.saic_api.start_front_defrost(self.vin_info)
-                self.publisher.publish_str(result_key, MSG_CMD_SUCCESSFUL)
-            elif front_window_heat_state.lower() == 'off':
-                LOG.info('Front window heating will be switched off')
-                self.saic_api.stop_front_defrost(self.vin_info)
-                self.publisher.publish_str(result_key, MSG_CMD_SUCCESSFUL)
-            else:
-                message = f'Invalid front window heat state: {front_window_heat_state}. Valid values are on and off'
-                self.publisher.publish_str(result_key, message)
-        except SaicApiException as e:
-            self.publisher.publish_str(result_key, f'Failed: {e.message}')
-            LOG.exception('update_front_window_heat_state failed', exc_info=e)
-
     async def handle_vehicle(self) -> None:
         self.vehicle_state.configure(self.vin_info)
         start_time = datetime.datetime.now()
         self.vehicle_state.notify_car_activity_time(start_time, True)
 
         while True:
-            self.publisher.keepalive()
             if (
                     not self.vehicle_state.is_complete()
                     and datetime.datetime.now() > start_time + datetime.timedelta(seconds=10)
@@ -224,7 +217,8 @@ class VehicleHandler:
                         temp = int(payload)
                         changed = self.vehicle_state.set_ac_temperature(temp)
                         if changed and self.vehicle_state.is_remote_ac_running():
-                            self.saic_api.start_ac(self.vin_info, temperature_idx=self.vehicle_state.get_ac_temperature_idx())
+                            self.saic_api.start_ac(self.vin_info,
+                                                   temperature_idx=self.vehicle_state.get_ac_temperature_idx())
 
                     except ValueError as e:
                         raise MqttGatewayException(f'Error setting SoC target: {e}')
@@ -238,7 +232,8 @@ class VehicleHandler:
                             self.saic_api.start_ac_blowing(self.vin_info)
                         case 'on':
                             LOG.info('A/C will be switched on')
-                            self.saic_api.start_ac(self.vin_info, temperature_idx=self.vehicle_state.get_ac_temperature_idx())
+                            self.saic_api.start_ac(self.vin_info,
+                                                   temperature_idx=self.vehicle_state.get_ac_temperature_idx())
                         case 'front':
                             LOG.info("A/C will be set to front seats only")
                             self.saic_api.start_ac_blowing(self.vin_info)
@@ -283,15 +278,44 @@ class VehicleHandler:
                             self.saic_api.start_front_defrost(self.vin_info)
                         case _:
                             raise MqttGatewayException(f'Unsupported payload {msg.payload.decode()}')
+                case mqtt_topics.DRIVETRAIN_CHARGECURRENT_LIMIT:
+                    payload = msg.payload.decode().strip().upper()
+                    if self.vehicle_state.target_soc is not None:
+                        try:
+                            LOG.info("Setting charging current limit to %s", payload)
+                            raw_charge_current_limit = str(payload)
+                            charge_current_limit = ChargeCurrentLimitCode.to_code(raw_charge_current_limit)
+                            self.saic_api.set_target_battery_soc(self.vehicle_state.target_soc, self.vin_info,
+                                                                 charge_current_limit)
+                            self.vehicle_state.update_charge_current_limit(charge_current_limit)
+                        except ValueError:
+                            raise MqttGatewayException(f'Error setting value for payload {payload}')
+                    else:
+                        logging.info(
+                            f'Unknown Target SOC: waiting for state update before changing charge current limit')
+                        raise MqttGatewayException(
+                            f'Error setting charge current limit - SOC {self.vehicle_state.target_soc}')
                 case mqtt_topics.DRIVETRAIN_SOC_TARGET:
                     payload = msg.payload.decode().strip()
                     try:
                         LOG.info("Setting SoC target to %s", payload)
                         target_battery_code = TargetBatteryCode.from_percentage(int(payload))
-                        self.vehicle_state.update_target_soc(target_battery_code)
                         self.saic_api.set_target_battery_soc(target_battery_code, self.vin_info)
+                        self.vehicle_state.update_target_soc(target_battery_code)
                     except ValueError as e:
                         raise MqttGatewayException(f'Error setting SoC target: {e}')
+                case mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE:
+                    payload = msg.payload.decode().strip()
+                    try:
+                        LOG.info("Setting charging schedule to %s", payload)
+                        payload_json = json.loads(payload)
+                        start_time = datetime.time.fromisoformat(payload_json['startTime'])
+                        end_time = datetime.time.fromisoformat(payload_json['endTime'])
+                        mode = ScheduledChargingMode[payload_json['mode'].upper()]
+                        self.saic_api.set_schedule_charging(start_time, end_time, mode, self.vin_info)
+                        self.vehicle_state.update_scheduled_charging(start_time, mode)
+                    except Exception as e:
+                        raise MqttGatewayException(f'Error setting charging schedule: {e}')
                 case _:
                     # set mode, period (in)-active,...
                     self.vehicle_state.configure_by_message(topic, msg)
@@ -319,14 +343,22 @@ class MqttGateway:
         self.vehicle_handler: dict[str, VehicleHandler] = {}
         self.publisher = MqttClient(self.configuration)
         self.publisher.on_mqtt_command_received = self.__on_mqtt_command_received
-        self.saic_api = SaicApi(config.saic_uri, config.saic_user, config.saic_password, config.saic_relogin_delay)
+        self.saic_api = SaicApi(
+            config.saic_uri,
+            config.saic_rest_uri,
+            config.saic_user,
+            config.saic_password,
+            config.saic_relogin_delay
+        )
         self.saic_api.on_publish_json_value = self.__on_publish_json_value
         self.saic_api.on_publish_raw_value = self.__on_publish_raw_value
         # LBR tesst to not publish to MQTT
         if self.configuration.mqtt_host != '0.0.0.0':
             self.publisher.connect()
 
-    def run(self):
+    async def run(self):
+        scheduler = apscheduler.schedulers.asyncio.AsyncIOScheduler()
+        scheduler.start()
         try:
             login_response_message = self.saic_api.login()
             user_logging_in_response = cast(MpUserLoggingInRsp, login_response_message.application_data)
@@ -345,25 +377,39 @@ class MqttGateway:
         for info in user_logging_in_response.vin_list:
             vin_info = cast(VinInfo, info)
             account_prefix = f'{self.configuration.saic_user}/{mqtt_topics.VEHICLES}/{vin_info.vin}'
-            wb_lp = self.get_open_wb_lp(vin_info.vin)
-            if wb_lp:
-                wallbox_soc_topic = f'{self.configuration.open_wb_topic}/set/lp/{wb_lp}/%Soc'
-                LOG.debug(f'SoC for wallbox is published over MQTT topic: {wallbox_soc_topic}')
-            else:
-                wallbox_soc_topic = ''
-            vehicle_state = VehicleState(self.publisher, account_prefix, vin_info, wallbox_soc_topic)
+            charging_station = self.get_charging_station(vin_info.vin)
+            if charging_station:
+                LOG.debug(f'SoC for charging station will be published over MQTT topic: {charging_station.soc_topic}')
+            total_battery_capacity = configuration.battery_capacity_map.get(vin_info.vin, None)
+            vehicle_state = VehicleState(
+                self.publisher,
+                scheduler,
+                account_prefix,
+                vin_info,
+                charging_station,
+                charge_polling_min_percent=self.configuration.charge_dynamic_polling_min_percentage,
+                total_battery_capacity=total_battery_capacity
+            )
             vehicle_state.configure(vin_info)
 
             vehicle_handler = VehicleHandler(
-                self.configuration,  # Gateway pointer
+                self.configuration,
                 self.saic_api,
-                self.publisher,
+                self.publisher,  # Gateway pointer
                 vin_info,
-                vehicle_state)
+                vehicle_state
+            )
             self.vehicle_handler[vin_info.vin] = vehicle_handler
-
-        message_handler = MessageHandler(self, self.saic_api, self.configuration.messages_request_interval)
-        asyncio.run(main(self.vehicle_handler, message_handler))
+        message_handler = MessageHandler(self, self.saic_api)
+        scheduler.add_job(
+            func=message_handler.check_for_new_messages,
+            trigger='interval',
+            seconds=self.configuration.messages_request_interval,
+            id='message_handler',
+            name='Check for new messages',
+            max_instances=1
+        )
+        await self.__main_loop()
 
     def get_vehicle_handler(self, vin: str) -> VehicleHandler | None:
         if vin in self.vehicle_handler:
@@ -382,31 +428,57 @@ class MqttGateway:
     def __on_publish_raw_value(self, key: str, raw: str):
         self.publisher.publish_str(key, raw)
 
-    def __on_publish_json_value(self, key: str, json: dict):
-        self.publisher.publish_json(key, json)
+    def __on_publish_json_value(self, key: str, json_data: dict):
+        self.publisher.publish_json(key, json_data)
 
-    def get_open_wb_lp(self, vin) -> str | None:
-        for key in self.configuration.open_wb_lp_map.keys():
-            if self.configuration.open_wb_lp_map[key] == vin:
-                return key
-        return None
+    def get_charging_station(self, vin) -> ChargingStation | None:
+        if vin in self.configuration.charging_stations_by_vin:
+            return self.configuration.charging_stations_by_vin[vin]
+        else:
+            return None
+
+    async def __main_loop(self):
+        tasks = []
+        for (key, vh) in self.vehicle_handler.items():
+            LOG.debug(f'Starting process for car {key}')
+            task = asyncio.create_task(vh.handle_vehicle(), name=f'handle_vehicle_{key}')
+            tasks.append(task)
+
+        await self.__shutdown_handler(tasks)
+
+    @staticmethod
+    async def __shutdown_handler(tasks):
+        while True:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task_name = task.get_name()
+                if task.cancelled():
+                    LOG.debug(f'{task_name !r} task was cancelled, this is only supposed if the application is '
+                              + f'shutting down')
+                else:
+                    exception = task.exception()
+                    if exception is not None:
+                        LOG.exception(f'{task_name !r} task crashed with an exception', exc_info=exception)
+                        raise SystemExit(-1)
+                    else:
+                        LOG.warning(f'{task_name !r} task terminated cleanly with result={task.result()}')
+            if len(pending) == 0:
+                break
+            else:
+                LOG.warning(f'There are still {len(pending)} tasks... waiting for them to complete')
 
 
 class MessageHandler:
-    def __init__(self, gateway: MqttGateway, saicapi: SaicApi, refresh_interval: int):
+    def __init__(self, gateway: MqttGateway, saicapi: SaicApi):
         self.gateway = gateway
         self.saicapi = saicapi
-        self.refresh_interval = refresh_interval
 
     async def check_for_new_messages(self) -> None:
-        while True:
-            if self.__should_poll():
-                LOG.debug("Checking for new messages")
-                self.__polling()
-            else:
-                LOG.debug("Not checking for new messages since all cars have RefreshMode.OFF")
-            LOG.debug(f'Waiting {self.refresh_interval} seconds to check for new messages')
-            await asyncio.sleep(float(self.refresh_interval))
+        if self.__should_poll():
+            LOG.debug("Checking for new messages")
+            self.__polling()
+        else:
+            LOG.debug("Not checking for new messages since all cars have RefreshMode.OFF")
 
     def __polling(self):
         try:
@@ -484,38 +556,16 @@ class EnvDefault(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
-async def main(vh_map: dict[str, VehicleHandler], message_handler: MessageHandler):
-    tasks = []
-    for key in vh_map:
-        LOG.debug(f'Starting process for car {key}')
-        vh = vh_map[key]
-        task = asyncio.create_task(vh.handle_vehicle(), name=f'handle_vehicle_{key}')
-        tasks.append(task)
+def get_charging_stations(open_wb_lp_map: dict[str, str]) -> dict[str, ChargingStation]:
+    LOG.info(f'OPENWB_LP_MAP is deprecated! Please provide {CHARGING_STATIONS_FILE} file instead!')
+    charging_stations = {}
+    for loading_point_no in open_wb_lp_map.keys():
+        vin = open_wb_lp_map[loading_point_no]
+        charging_station = ChargingStation(vin, f'openWB/lp/{loading_point_no}/boolChargeStat', '1',
+                                           f'openWB/set/lp/{loading_point_no}/%Soc')
+        charging_stations[vin] = charging_station
 
-    tasks.append(asyncio.create_task(message_handler.check_for_new_messages(), name='message_handler'))
-
-    await shutdown_handler(tasks)
-
-
-async def shutdown_handler(tasks):
-    while True:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task_name = task.get_name()
-            if task.cancelled():
-                LOG.debug(f'{task_name !r} task was cancelled, this is only supposed if the application is '
-                          + f'shutting down')
-            else:
-                exception = task.exception()
-                if exception is not None:
-                    LOG.exception(f'{task_name !r} task crashed with an exception', exc_info=exception)
-                    raise SystemExit(-1)
-                else:
-                    LOG.warning(f'{task_name !r} task terminated cleanly with result={task.result()}')
-        if len(pending) == 0:
-            break
-        else:
-            LOG.warning(f'There are still {len(pending)} tasks... waiting for them to complete')
+    return charging_stations
 
 
 def process_arguments() -> Configuration:
@@ -524,12 +574,21 @@ def process_arguments() -> Configuration:
     try:
         parser.add_argument('-m', '--mqtt-uri', help='The URI to the MQTT Server. Environment Variable: MQTT_URI,'
                                                      + 'TCP: tcp://mqtt.eclipseprojects.io:1883 '
-                                                     + 'WebSocket: ws://mqtt.eclipseprojects.io:9001',
+                                                     + 'WebSocket: ws://mqtt.eclipseprojects.io:9001'
+                                                     + 'TLS: tls://mqtt.eclipseprojects.io:8883',
                             dest='mqtt_uri', required=True, action=EnvDefault, envvar='MQTT_URI')
+        parser.add_argument('--mqtt-server-cert',
+                            help='Path to the server certificate authority file in PEM format for TLS.',
+                            dest='tls_server_cert_path', required=False, action=EnvDefault, envvar='MQTT_SERVER_CERT')
         parser.add_argument('--mqtt-user', help='The MQTT user name. Environment Variable: MQTT_USER',
                             dest='mqtt_user', required=False, action=EnvDefault, envvar='MQTT_USER')
         parser.add_argument('--mqtt-password', help='The MQTT password. Environment Variable: MQTT_PASSWORD',
                             dest='mqtt_password', required=False, action=EnvDefault, envvar='MQTT_PASSWORD')
+        parser.add_argument('--mqtt-client-id', help='The MQTT Client Identifier. Environment Variable: '
+                                                     + 'MQTT_CLIENT_ID '
+                                                     + 'Default is saic-python-mqtt-gateway',
+                            default='saic-python-mqtt-gateway', dest='mqtt_client_id', required=False,
+                            action=EnvDefault, envvar='MQTT_CLIENT_ID')
         parser.add_argument('--mqtt-topic-prefix', help='MQTT topic prefix. Environment Variable: MQTT_TOPIC'
                                                         + 'Default is saic', default='saic', dest='mqtt_topic',
                             required=False, action=EnvDefault, envvar='MQTT_TOPIC')
@@ -553,10 +612,19 @@ def process_arguments() -> Configuration:
                                                       + ' Example: LSJXXXX=12345-abcdef,LSJYYYY=67890-ghijkl,'
                                                       + ' Environment Variable: ABRP_USER_TOKEN',
                             dest='abrp_user_token', required=False, action=EnvDefault, envvar='ABRP_USER_TOKEN')
+        parser.add_argument('--battery-capacity-mapping', help='The mapping of VIN to full batteryc'
+                                                               + ' apacity. Multiple mappings can be provided separated'
+                                                               + ' by , Example: LSJXXXX=54.0,LSJYYYY=64.0,'
+                                                               + ' Environment Variable: BATTERY_CAPACITY_MAPPING',
+                            dest='battery_capacity_mapping', required=False, action=EnvDefault,
+                            envvar='BATTERY_CAPACITY_MAPPING')
         parser.add_argument('--openwb-lp-map', help='The mapping of VIN to openWB charging point.'
                                                     + ' Multiple mappings can be provided seperated by ,'
                                                     + ' Example: LSJXXXX=1,LSJYYYY=2',
                             dest='open_wp_lp_map', required=False, action=EnvDefault, envvar='OPENWB_LP_MAP')
+        parser.add_argument('--charging-stations-json', help='Custom charging stations configuration file name',
+                            dest='charging_stations_file', required=False, action=EnvDefault,
+                            envvar='CHARGING_STATIONS_JSON')
         parser.add_argument('--saic-relogin-delay', help='How long to wait before attempting another login to the SAIC '
                                                          'API. Environment Variable: SAIC_RELOGIN_DELAY',
                             dest='saic_relogin_delay', required=False, action=EnvDefault, envvar='SAIC_RELOGIN_DELAY',
@@ -569,9 +637,16 @@ def process_arguments() -> Configuration:
                                                           'HA_DISCOVERY_PREFIX', dest='ha_discovery_prefix',
                             required=False, action=EnvDefault,
                             envvar='HA_DISCOVERY_PREFIX', default='homeassistant')
+        parser.add_argument('--charge-min-percentage',
+                            help='How many % points we should try to refresh the charge state. Environment Variable: '
+                                 'CHARGE_MIN_PERCENTAGE', dest='charge_dynamic_polling_min_percentage', required=False,
+                            action=EnvDefault, envvar='CHARGE_MIN_PERCENTAGE', default='1.0', type=check_positive_float)
+
         args = parser.parse_args()
         config.mqtt_user = args.mqtt_user
         config.mqtt_password = args.mqtt_password
+        config.mqtt_client_id = args.mqtt_client_id
+        config.charge_dynamic_polling_min_percentage = args.charge_dynamic_polling_min_percentage
         if args.saic_relogin_delay:
             config.saic_relogin_delay = args.saic_relogin_delay
         config.mqtt_topic = args.mqtt_topic
@@ -581,8 +656,21 @@ def process_arguments() -> Configuration:
         config.abrp_api_key = args.abrp_api_key
         if args.abrp_user_token:
             cfg_value_to_dict(args.abrp_user_token, config.abrp_token_map)
+        if args.battery_capacity_mapping:
+            cfg_value_to_dict(
+                args.battery_capacity_mapping,
+                config.battery_capacity_map,
+                value_type=check_positive_float
+            )
         if args.open_wp_lp_map:
-            cfg_value_to_dict(args.open_wp_lp_map, config.open_wb_lp_map)
+            open_wb_lp_map = {}
+            cfg_value_to_dict(args.open_wp_lp_map, open_wb_lp_map)
+            config.charging_stations_by_vin = get_charging_stations(open_wb_lp_map)
+        if args.charging_stations_file:
+            process_charging_stations_file(config, args.charging_stations_file)
+        else:
+            process_charging_stations_file(config, f'./{CHARGING_STATIONS_FILE}')
+
         config.saic_password = args.saic_password
 
         if args.ha_discovery_enabled:
@@ -593,9 +681,15 @@ def process_arguments() -> Configuration:
 
         parse_result = urllib.parse.urlparse(args.mqtt_uri)
         if parse_result.scheme == 'tcp':
-            config.mqtt_transport_protocol = 'tcp'
+            config.mqtt_transport_protocol = TransportProtocol.TCP
         elif parse_result.scheme == 'ws':
-            config.mqtt_transport_protocol = 'websockets'
+            config.mqtt_transport_protocol = TransportProtocol.WS
+        elif parse_result.scheme == 'tls':
+            config.mqtt_transport_protocol = TransportProtocol.TLS
+            if args.tls_server_cert_path:
+                config.tls_server_cert_path = args.tls_server_cert_path
+            else:
+                raise SystemExit(f'No server certificate authority file provided for TLS MQTT URI {args.mqtt_uri}')
         else:
             raise SystemExit(f'Invalid MQTT URI scheme: {parse_result.scheme}, use tcp or ws')
 
@@ -615,7 +709,29 @@ def process_arguments() -> Configuration:
         SystemExit(err)
 
 
-def cfg_value_to_dict(cfg_value: str, result_map: dict):
+def process_charging_stations_file(config: Configuration, json_file: str):
+    try:
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+
+            for item in data:
+                charge_state_topic = item['chargeStateTopic']
+                charging_value = item['chargingValue']
+                soc_topic = item['socTopic']
+                vin = item['vin']
+                charging_station = ChargingStation(vin, charge_state_topic, charging_value, soc_topic)
+                if 'chargerConnectedTopic' in item:
+                    charging_station.connected_topic = item['chargerConnectedTopic']
+                if 'chargerConnectedValue' in item:
+                    charging_station.connected_value = item['chargerConnectedValue']
+                config.charging_stations_by_vin[vin] = charging_station
+    except FileNotFoundError:
+        LOG.warning(f'File {json_file} does not exist')
+    except json.JSONDecodeError as e:
+        LOG.exception(f'Reading {json_file} failed', exc_info=e)
+
+
+def cfg_value_to_dict(cfg_value: str, result_map: dict, value_type: Callable[[str], any] = str):
     if ',' in cfg_value:
         map_entries = cfg_value.split(',')
     else:
@@ -626,7 +742,7 @@ def cfg_value_to_dict(cfg_value: str, result_map: dict):
             key_value_pair = entry.split('=')
             key = key_value_pair[0]
             value = key_value_pair[1]
-            result_map[key] = value
+            result_map[key] = value_type(value)
 
 
 def check_positive(value):
@@ -634,6 +750,13 @@ def check_positive(value):
     if ivalue <= 0:
         raise argparse.ArgumentTypeError(f'{ivalue} is an invalid positive int value')
     return ivalue
+
+
+def check_positive_float(value):
+    fvalue = float(value)
+    if fvalue <= 0:
+        raise argparse.ArgumentTypeError(f'{fvalue} is an invalid positive float value')
+    return fvalue
 
 
 def check_bool(value):
@@ -648,4 +771,4 @@ if __name__ == '__main__':
     configuration = process_arguments()
 
     mqtt_gateway = MqttGateway(configuration)
-    mqtt_gateway.run()
+    asyncio.run(mqtt_gateway.run(), debug=debug_log_enabled())

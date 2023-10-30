@@ -1,9 +1,22 @@
+import json
+import logging
+import os
+
 import inflection as inflection
+from saic_ismart_client.common_model import ScheduledChargingMode
 from saic_ismart_client.ota_v1_1.data_model import VinInfo
+from saic_ismart_client.common_model import ChargeCurrentLimitCode
 
 import mqtt_topics
 from mqtt_publisher import MqttClient
 from vehicle import VehicleState, RefreshMode
+
+PAYLOAD_NOT_AVAILABLE = 'payload_not_available'
+PAYLOAD_AVAILABLE = 'payload_available'
+AVAILABILITY_TOPIC = 'availability_topic'
+
+LOG = logging.getLogger(__name__)
+LOG.setLevel(level=os.getenv('LOG_LEVEL', 'INFO').upper())
 
 
 class HomeAssistantDiscovery:
@@ -13,10 +26,17 @@ class HomeAssistantDiscovery:
 
     def publish_ha_discovery_messages(self):
         if not self.__vehicle_state.is_complete():
+            LOG.debug("Skipping Home Assistant discovery messages as vehicle state is not yet complete")
             return
+
+        LOG.debug("Publishing Home Assistant discovery messages")
+
         # Gateway Control
         self.__publish_select(mqtt_topics.REFRESH_MODE, 'Gateway refresh mode', [m.value for m in RefreshMode],
                               icon='mdi:refresh')
+        self.__publish_select(mqtt_topics.DRIVETRAIN_CHARGECURRENT_LIMIT, 'Charge current limit',
+                              [m.get_limit() for m in ChargeCurrentLimitCode if m != ChargeCurrentLimitCode.C_IGNORE],
+                              icon='mdi:current-ac')
         self.__publish_number(mqtt_topics.REFRESH_PERIOD_ACTIVE, 'Gateway active refresh period',
                               unit_of_measurement='s', icon='mdi:timer', min=30, max=60 * 60, step=1)
         self.__publish_number(mqtt_topics.REFRESH_PERIOD_INACTIVE, 'Gateway inactive refresh period',
@@ -27,12 +47,17 @@ class HomeAssistantDiscovery:
         self.__publish_number(mqtt_topics.REFRESH_PERIOD_INACTIVE_GRACE, 'Gateway grace period after car shutdown',
                               unit_of_measurement='s', icon='mdi:timer', min=30, max=12 * 60 * 60, step=1)
 
+        self.__publish_sensor(mqtt_topics.REFRESH_PERIOD_CHARGING, 'Gateway charging refresh period',
+                              unit_of_measurement='s', icon='mdi:timer')
         self.__publish_sensor(mqtt_topics.REFRESH_LAST_ACTIVITY, 'Last car activity', device_class='timestamp', )
         self.__publish_sensor(mqtt_topics.REFRESH_LAST_CHARGE_STATE, 'Last charge state', device_class='timestamp', )
         self.__publish_sensor(mqtt_topics.REFRESH_LAST_VEHICLE_STATE, 'Last vehicle state', device_class='timestamp', )
 
-        # AC
+        # Complex sensors
         self.__publish_remote_ac()
+        self.__publish_vehicle_tracker()
+        self.__publish_scheduled_charging()
+
         # Switches
         self.__publish_switch(mqtt_topics.DRIVETRAIN_CHARGING, 'Charging')
         self.__publish_switch(mqtt_topics.WINDOWS_DRIVER, 'Window driver')
@@ -42,11 +67,11 @@ class HomeAssistantDiscovery:
         self.__publish_switch(mqtt_topics.WINDOWS_SUN_ROOF, 'Sun roof', enabled=self.__vehicle_state.has_sunroof())
         self.__publish_switch(mqtt_topics.CLIMATE_BACK_WINDOW_HEAT, 'Rear window defroster heating',
                               icon='mdi:car-defrost-rear', payload_on='on', payload_off='off')
+
         # Locks
         self.__publish_lock(mqtt_topics.DOORS_LOCKED, 'Doors Lock', icon='mdi:car-door-lock')
         self.__publish_lock(mqtt_topics.DOORS_BOOT, 'Boot Lock', icon='mdi:car-door-lock', state_locked='False',
                             state_unlocked='True')
-
         # Target SoC
         self.__publish_number(
             mqtt_topics.DRIVETRAIN_SOC_TARGET,
@@ -58,21 +83,24 @@ class HomeAssistantDiscovery:
             step=10,
             mode='slider',
             icon='mdi:battery-charging-70',
+            enabled=self.__vehicle_state.supports_target_soc(),
         )
 
-        # Vehicle Tracker
-        self.__publish_vehicle_tracker()
         # Standard sensors
         self.__publish_sensor(mqtt_topics.DRIVETRAIN_SOC, 'SoC', device_class='battery', state_class='measurement',
                               unit_of_measurement='%')
+        self.__publish_sensor(mqtt_topics.DRIVETRAIN_SOC_KWH, 'SoC_kWh', device_class='ENERGY_STORAGE',
+                              state_class='measurement', unit_of_measurement='kWh')
         self.__publish_sensor(mqtt_topics.DRIVETRAIN_REMAINING_CHARGING_TIME, 'Remaining charging time',
                               device_class='duration', state_class='measurement', unit_of_measurement='s')
-        self.__publish_sensor(mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE, 'Scheduled Charging Start',
-                              value_template='{{ value_json["startTime"] }}', icon='mdi:clock-start')
-        self.__publish_sensor(mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE, 'Scheduled Charging End',
-                              value_template='{{ value_json["endTime"] }}', icon='mdi:clock-end')
-        self.__publish_sensor(mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE, 'Scheduled Charging Mode',
-                              value_template='{{ value_json["mode"] }}')
+        custom_availability = {
+            AVAILABILITY_TOPIC: self.__get_vehicle_topic(mqtt_topics.DRIVETRAIN_REMAINING_CHARGING_TIME),
+            PAYLOAD_NOT_AVAILABLE: '0'
+        }
+        self.__publish_sensor(mqtt_topics.DRIVETRAIN_REMAINING_CHARGING_TIME, 'Charging finished',
+                              device_class='timestamp',
+                              value_template='{{ (now() + timedelta(seconds = value | int)).isoformat() }}',
+                              custom_availability=custom_availability)
         self.__publish_sensor(mqtt_topics.DRIVETRAIN_MILEAGE, 'Mileage', device_class='distance',
                               state_class='total_increasing', unit_of_measurement='km')
         self.__publish_sensor(mqtt_topics.DRIVETRAIN_MILEAGE_OF_DAY, 'Mileage of the day', device_class='distance',
@@ -97,8 +125,6 @@ class HomeAssistantDiscovery:
                               icon='mdi:car-connected')
         self.__publish_sensor(mqtt_topics.CLIMATE_BACK_WINDOW_HEAT, 'Rear window defroster heating',
                               icon='mdi:car-defrost-rear')
-        self.__publish_sensor(mqtt_topics.CLIMATE_FRONT_WINDOW_HEAT, 'Front window defroster heating',
-                              icon='mdi:car-defrost-front')
         self.__publish_sensor(mqtt_topics.LOCATION_HEADING, 'Heading', icon='mdi:compass')
         self.__publish_sensor(mqtt_topics.LOCATION_SPEED, 'Vehicle speed', device_class='speed',
                               unit_of_measurement='km/h')
@@ -131,23 +157,48 @@ class HomeAssistantDiscovery:
         self.__publish_binary_sensor(mqtt_topics.LIGHTS_DIPPED_BEAM, 'Lights Dipped Beam', device_class='light',
                                      icon='mdi:car-light-dimmed')
 
+        # Remove deprecated sensors
+        self.__unpublish_ha_discovery_message('sensor', 'Front window defroster heating')
+        LOG.debug("Completed publishing Home Assistant discovery messages")
+
     def __publish_vehicle_tracker(self):
         self.__publish_ha_discovery_message('device_tracker', 'Vehicle position', {
             'json_attributes_topic': self.__get_vehicle_topic(mqtt_topics.LOCATION_POSITION)
         })
 
     def __publish_remote_ac(self):
+        # This has been converted into 2 switches and a climate entity for ease of operation
+
+        self.__publish_ha_discovery_message('switch', 'Front window defroster heating', {
+            'icon': 'mdi:car-defrost-front',
+            'state_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE),
+            'command_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE) + '/set',
+            'value_template': '{% if value == "front" %}front{% else %}off{% endif %}',
+            'state_on': 'front',
+            'state_off': 'off',
+            'payload_on': 'front',
+            'payload_off': 'off',
+        })
+
+        self.__publish_ha_discovery_message('switch', 'Vehicle climate fan only', {
+            'icon': 'mdi:fan',
+            'state_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE),
+            'command_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE) + '/set',
+            'value_template': '{% if value == "blowingOnly" %}blowingOnly{% else %}off{% endif %}',
+            'state_on': 'blowingOnly',
+            'state_off': 'off',
+            'payload_on': 'blowingOnly',
+            'payload_off': 'off',
+        })
+
         self.__publish_ha_discovery_message('climate', 'Vehicle climate', {
             'precision': 1.0,
             'temperature_unit': 'C',
             'mode_state_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE),
             'mode_command_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE) + '/set',
-            'mode_state_template': '{% if value == "off" %}off{% else %}auto{% endif %}',
-            'mode_command_template': '{% if value == "off" %}off{% else %}on{% endif %}',
+            'mode_state_template': '{% if value == "on" %}auto{% else %}off{% endif %}',
+            'mode_command_template': '{% if value == "auto" %}on{% else %}off{% endif %}',
             'modes': ['off', 'auto'],
-            'preset_modes': ['off', 'on', 'blowingOnly', 'front'],
-            'preset_mode_command_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE) + '/set',
-            'preset_mode_state_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_CLIMATE_STATE),
             'current_temperature_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_INTERIOR_TEMPERATURE),
             'current_temperature_template': '{{ value }}',
             'temperature_command_topic': self.__get_vehicle_topic(mqtt_topics.CLIMATE_REMOTE_TEMPERATURE) + '/set',
@@ -166,7 +217,7 @@ class HomeAssistantDiscovery:
             icon: str | None = None,
             payload_on='True',
             payload_off='False',
-    ):
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'command_topic': self.__get_vehicle_topic(topic) + '/set',
@@ -178,18 +229,19 @@ class HomeAssistantDiscovery:
         }
         if icon is not None:
             payload['icon'] = icon
-        self.__publish_ha_discovery_message('switch', name, payload)
+        return self.__publish_ha_discovery_message('switch', name, payload)
 
     def __publish_lock(
             self,
             topic: str,
             name: str,
+            enabled=True,
             icon: str | None = None,
             payload_lock: str = 'True',
             payload_unlock: str = 'False',
             state_locked: str = 'True',
             state_unlocked: str = 'False',
-    ):
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'command_topic': self.__get_vehicle_topic(topic) + '/set',
@@ -199,24 +251,28 @@ class HomeAssistantDiscovery:
             'state_unlocked': state_unlocked,
             'optimistic': False,
             'qos': 0,
+            'enabled_by_default': enabled,
         }
         if icon is not None:
             payload['icon'] = icon
-        self.__publish_ha_discovery_message('lock', name, payload)
+        return self.__publish_ha_discovery_message('lock', name, payload)
 
     def __publish_sensor(
             self,
             topic: str,
             name: str,
+            enabled=True,
             device_class: str | None = None,
             state_class: str | None = None,
             unit_of_measurement: str | None = None,
             icon: str | None = None,
             value_template: str = '{{ value }}',
-    ):
+            custom_availability: dict[str, str] | None = None
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'value_template': value_template,
+            'enabled_by_default': enabled,
         }
         if device_class is not None:
             payload['device_class'] = device_class
@@ -227,12 +283,13 @@ class HomeAssistantDiscovery:
         if icon is not None:
             payload['icon'] = icon
 
-        self.__publish_ha_discovery_message('sensor', name, payload)
+        return self.__publish_ha_discovery_message('sensor', name, payload, custom_availability)
 
     def __publish_number(
             self,
             topic: str,
             name: str,
+            enabled=True,
             device_class: str | None = None,
             state_class: str | None = None,
             unit_of_measurement: str | None = None,
@@ -243,7 +300,7 @@ class HomeAssistantDiscovery:
             min: float = 1.0,
             max: float = 100.0,
             step: float = 1.0,
-    ):
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'command_topic': self.__get_vehicle_topic(topic) + '/set',
@@ -253,6 +310,7 @@ class HomeAssistantDiscovery:
             'min': min,
             'max': max,
             'step': step,
+            'enabled_by_default': enabled,
         }
         if device_class is not None:
             payload['device_class'] = device_class
@@ -263,72 +321,123 @@ class HomeAssistantDiscovery:
         if icon is not None:
             payload['icon'] = icon
 
-        self.__publish_ha_discovery_message('number', name, payload)
+        return self.__publish_ha_discovery_message('number', name, payload)
+
+    def __publish_text(
+            self,
+            topic: str,
+            name: str,
+            enabled=True,
+            icon: str | None = None,
+            value_template: str = '{{ value }}',
+            command_template: str = '{{ value }}',
+            retain: bool = False,
+            min: int | None = None,
+            max: int | None = None,
+            pattern: str | None = None,
+    ) -> str:
+        payload = {
+            'state_topic': self.__get_vehicle_topic(topic),
+            'command_topic': self.__get_vehicle_topic(topic) + '/set',
+            'value_template': value_template,
+            'command_template': command_template,
+            'retain': str(retain).lower(),
+            'enabled_by_default': enabled,
+        }
+        if min is not None:
+            payload['min'] = min
+        if max is not None:
+            payload['max'] = max
+        if pattern is not None:
+            payload['pattern'] = pattern
+        if icon is not None:
+            payload['icon'] = icon
+
+        return self.__publish_ha_discovery_message('text', name, payload)
 
     def __publish_binary_sensor(
             self,
             topic: str,
             name: str,
+            enabled=True,
             device_class: str | None = None,
             value_template: str = '{{ value }}',
             payload_on: str = 'True',
             payload_off: str = 'False',
             icon: str | None = None,
-    ):
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'value_template': value_template,
             'payload_on': payload_on,
             'payload_off': payload_off,
+            'enabled_by_default': enabled,
         }
         if device_class is not None:
             payload['device_class'] = device_class
         if icon is not None:
             payload['icon'] = icon
 
-        self.__publish_ha_discovery_message('binary_sensor', name, payload)
+        return self.__publish_ha_discovery_message('binary_sensor', name, payload)
 
     def __publish_select(
             self,
             topic: str,
             name: str,
             options: list[str],
+            enabled=True,
             value_template: str = '{{ value }}',
+            command_template: str = '{{ value }}',
             icon: str | None = None,
-    ):
+    ) -> str:
         payload = {
             'state_topic': self.__get_vehicle_topic(topic),
             'command_topic': self.__get_vehicle_topic(topic) + '/set',
             'value_template': value_template,
+            'command_template': command_template,
             'options': options,
+            'enabled_by_default': enabled,
         }
         if icon is not None:
             payload['icon'] = icon
 
-        self.__publish_ha_discovery_message('select', name, payload)
+        return self.__publish_ha_discovery_message('select', name, payload)
 
-    def __get_common_attributes(self, id, name):
-        return {
+    def __get_common_attributes(self, unique_id: str, name: str, custom_availability: dict[str, str] | None = None):
+        common_attributes = {
             'name': name,
             'device': self.__get_device_node(),
-            'unique_id': id,
-            'object_id': id,
-            'availability_topic': self.__get_system_topic(mqtt_topics.INTERNAL_LWT),
-            'payload_available': 'online',
-            'payload_not_available': 'offline',
+            'unique_id': unique_id,
+            'object_id': unique_id
         }
+
+        if custom_availability is not None:
+            if AVAILABILITY_TOPIC in custom_availability:
+                common_attributes[AVAILABILITY_TOPIC] = custom_availability[AVAILABILITY_TOPIC]
+            if PAYLOAD_AVAILABLE in custom_availability:
+                common_attributes[PAYLOAD_AVAILABLE] = custom_availability[PAYLOAD_AVAILABLE]
+            if PAYLOAD_NOT_AVAILABLE in custom_availability:
+                common_attributes[PAYLOAD_NOT_AVAILABLE] = custom_availability[PAYLOAD_NOT_AVAILABLE]
+        else:
+            common_attributes[AVAILABILITY_TOPIC] = self.__get_system_topic(mqtt_topics.INTERNAL_LWT)
+            common_attributes[PAYLOAD_AVAILABLE] = 'online'
+            common_attributes[PAYLOAD_NOT_AVAILABLE] = 'offline'
+
+        return common_attributes
 
     def __get_device_node(self):
         vin = self.__get_vin()
-        brand_name = str(self.__vin_info.brand_name, encoding='utf8')
-        model_name = str(self.__vin_info.model_name, encoding='utf8')
-        model_year = str(self.__vin_info.model_year)
-        color_name = str(self.__vin_info.color_name, encoding='utf8')
+        brand_name = decode_as_utf8(self.__vin_info.brand_name)
+        model_name = decode_as_utf8(self.__vin_info.model_name)
+        model_year = decode_as_utf8(self.__vin_info.model_year)
+        color_name = decode_as_utf8(self.__vin_info.color_name)
         series = str(self.__vin_info.series)
+        # Create a long model name concatenating model_name, model_year and color_name without multiple spaces
+        final_model_name = ' '.join([model_name, model_year, color_name]).strip().replace('  ', ' ')
         return {
             'name': f'{brand_name} {model_name} {vin}',
             'manufacturer': brand_name,
-            'model': f'{model_name} {model_year} {color_name}',
+            'model': final_model_name,
             'hw_version': series,
             'identifiers': [vin],
         }
@@ -350,14 +459,107 @@ class HomeAssistantDiscovery:
             return str(publisher.get_topic(vehicle_topic, no_prefix=False), encoding='utf8')
         return vehicle_topic
 
-    def __publish_ha_discovery_message(self, sensor_type: str, sensor_name: str, payload: dict):
+    def __publish_ha_discovery_message(
+            self,
+            sensor_type: str,
+            sensor_name: str,
+            payload: dict,
+            custom_availability: dict[str, str] | None = None
+    ) -> str:
         vin = self.__get_vin()
         unique_id = f'{vin}_{snake_case(sensor_name)}'
-        final_payload = self.__get_common_attributes(unique_id, sensor_name) | payload
+        final_payload = self.__get_common_attributes(unique_id, sensor_name, custom_availability) | payload
         discovery_prefix = self.__vehicle_state.publisher.configuration.ha_discovery_prefix
         ha_topic = f'{discovery_prefix}/{sensor_type}/{vin}_mg/{unique_id}/config'
         self.__vehicle_state.publisher.publish_json(ha_topic, final_payload, no_prefix=True)
+        return f"{sensor_type}.{unique_id}"
+
+    # This de-registers an entity from Home Assistant
+    def __unpublish_ha_discovery_message(self, sensor_type: str, sensor_name: str) -> None:
+        vin = self.__get_vin()
+        unique_id = f'{vin}_{snake_case(sensor_name)}'
+        discovery_prefix = self.__vehicle_state.publisher.configuration.ha_discovery_prefix
+        ha_topic = f'{discovery_prefix}/{sensor_type}/{vin}_mg/{unique_id}/config'
+        self.__vehicle_state.publisher.publish_str(ha_topic, '', no_prefix=True)
+
+    def __publish_scheduled_charging(self):
+        start_time_id = self.__publish_sensor(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging Start',
+            value_template='{{ value_json["startTime"] }}', icon='mdi:clock-start'
+        )
+        end_time_id = self.__publish_sensor(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging End',
+            value_template='{{ value_json["endTime"] }}', icon='mdi:clock-end'
+        )
+        scheduled_charging_mode_id = self.__publish_sensor(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging Mode',
+            value_template='{{ value_json["mode"] }}', icon='mdi:clock-outline',
+        )
+
+        change_mode_cmd_template = json.dumps({
+            "startTime": f"{{{{ states('{start_time_id}') }}}}",
+            "endTime": f"{{{{ states('{end_time_id}') }}}}",
+            "mode": "{{ value }}"
+        })
+        self.__publish_select(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging Mode',
+            options=[m.name for m in ScheduledChargingMode],
+            value_template='{{ value_json["mode"] }}',
+            command_template=change_mode_cmd_template,
+            icon='mdi:clock-outline',
+        )
+
+        change_start_cmd_template = json.dumps({
+            "startTime": "{{ value }}",
+            "endTime": f"{{{{ states('{end_time_id}') }}}}",
+            "mode": f"{{{{ states('{scheduled_charging_mode_id}') }}}}"
+        })
+        self.__publish_text(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging Start',
+            value_template='{{ value_json["startTime"] }}',
+            command_template=change_start_cmd_template,
+            min=4, max=5, pattern='^([01][0-9]|2[0-3]):[0-5][0-9]$',
+            icon='mdi:clock-start'
+        )
+
+        change_end_cmd_template = json.dumps({
+            "startTime": f"{{{{ states('{start_time_id}') }}}}",
+            "endTime": "{{ value }}",
+            "mode": f"{{{{ states('{scheduled_charging_mode_id}') }}}}"
+        })
+        self.__publish_text(
+            mqtt_topics.DRIVETRAIN_CHARGING_SCHEDULE,
+            'Scheduled Charging End',
+            value_template='{{ value_json["endTime"] }}',
+            command_template=change_end_cmd_template,
+            min=4, max=5, pattern='^([01][0-9]|2[0-3]):[0-5][0-9]$',
+            icon='mdi:clock-end'
+        )
 
 
 def snake_case(s):
     return inflection.underscore(s.lower()).replace(' ', '_')
+
+
+def decode_as_utf8(byte_string, default=''):
+    if byte_string is None:
+        return default
+    elif isinstance(byte_string, str):
+        return byte_string
+    elif isinstance(byte_string, bytes) or isinstance(byte_string, bytearray):
+        try:
+            return str(byte_string, encoding='utf8', errors='ignore')
+        except Exception:
+            LOG.exception(f'Failed to decode {byte_string} as utf8')
+            return default
+    else:
+        try:
+            return str(byte_string)
+        except Exception:
+            LOG.exception(f'Failed to decode {byte_string}')
+            return default
