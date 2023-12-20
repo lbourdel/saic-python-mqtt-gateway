@@ -31,6 +31,8 @@ from mqtt_publisher import MqttClient
 from publisher import Publisher
 from vehicle import RefreshMode, VehicleState
 
+import pytz
+
 MSG_CMD_SUCCESSFUL = 'Success'
 CHARGING_STATIONS_FILE = 'charging-stations.json'
 
@@ -86,21 +88,36 @@ class VehicleHandler:
         client = gspread.authorize(creds)
         self.sheet = client.open('test-abrp').sheet1
         self.data = {  }
+# saic/laurent.bourdel@gmail.com/vehicles/LSJWH4092PN041198/climate/frontWindowDefrosterHeating/set
+# raw on
 
     def update_mysheet(self, data):
-        abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(1;0;0)''']
-        if 'est_battery_range' in data:
-            if data['est_battery_range']:
-                dict = ['utc', 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'heading', 'lat', 'lon', 'elevation', 'battery_voltage']
-                for dico in dict:
-                    if dico in data:
-                        # print(dico, data[dico])
-                        abrp.append(data[dico])
-                    else:
-                        abrp.append('')
+        # abrp=['''=INDIRECT("B"&LIGNE())/86400+DATE(1970;1;1)+TEMPS(1;0;0)''']
+        abrp=[]
+        dict = [ 'soc', 'soc_kwh', 'power', 'voltage', 'current', 'is_charging', 'target_soc', 'is_parked', 'ext_temp', 'odometer', 'speed', 'est_battery_range', 'battery_voltage']
 
-                # self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
-                self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
+        print(type(data['utc']))
+        date_time = datetime.datetime.fromtimestamp( data['utc'],tz=pytz.timezone('Europe/Paris') )
+        datesheet = date_time.strftime("%d/%m/%Y %H:%M:%S")
+        abrp.append( datesheet)
+        for dico in dict:
+            empty = False
+            # print(dico, data[dico])
+            if data['est_battery_range'] > 500:
+                empty = True
+            if data['soc'] > 100:
+                empty = True
+            if empty:
+                abrp.append('')
+            else:
+                if 'target_soc' in dico:
+                    abrp.append(data[dico].name)
+                else:
+                    abrp.append(data[dico])
+
+        if data['est_battery_range'] or data['is_charging']:
+            # self.sheet.append_row(abrp, table_range="A2", value_input_option='USER_ENTERED')    
+            self.sheet.insert_row(abrp, index = 2, value_input_option='USER_ENTERED',  inherit_from_before=False)    
 # END
 
     async def handle_vehicle(self) -> None:
@@ -131,6 +148,8 @@ class VehicleHandler:
                         'power': int(charge_status.get_power()),
                         'voltage': int(charge_status.get_voltage()),
                         'current': int(charge_status.get_current()),
+                        # LBR
+                        'target_soc': (charge_status.get_charge_target_soc()),
 
                         'ext_temp':vehicle_status.basic_vehicle_status.exterior_temperature,
                         'odometer':vehicle_status.basic_vehicle_status.mileage / 10.0,
