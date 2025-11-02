@@ -208,9 +208,83 @@ class mygsheet:
             self.update_mysheet()
             return True
 
+        # flat_status =  flatdict.FlatDict((charge_status.chrgMgmtData.__dict__), delimiter='.')
+        # pprint.pprint(dict(flat_status).items())
+        # for k,v in dict(flat_status).items():print(k,':', v )
+# 'bmsAdpPubChrgSttnDspCmd'
+# 'bmsAltngChrgCrntDspCmd'
+# 'bmsChrgCtrlDspCmd'
+# 'bmsChrgOtptCrntReq'
+# 'bmsChrgOtptCrntReqV'
+# 'bmsChrgSpRsn'
+# 'bmsChrgSts'
+# 'bmsDsChrgSpRsn'
+# 'bmsEstdElecRng'
+# 'bmsOnBdChrgTrgtSOCDspCmd'
+# 'bmsPackCrnt'
+# 'bmsPackCrntV'
+# 'bmsPackSOCDsp'
+# 'bmsPackVol'
+# 'bmsPTCHeatReqDspCmd'
+# 'bmsPTCHeatResp'
+# 'bmsPTCHeatSpRsn'
+# 'bmsReserCtrlDspCmd'
+# 'bmsReserSpHourDspCmd'
+# 'bmsReserSpMintueDspCmd'
+# 'bmsReserStHourDspCmd'
+# 'bmsReserStMintueDspCmd'
+# 'ccuEleccLckCtrlDspCmd'
+# 'ccuOffBdChrgrPlugOn'
+# 'ccuOnbdChrgrPlugOn'
+# 'chrgngAddedElecRng'
+# 'chrgngAddedElecRngV'
+# 'chrgngDoorOpenCnd'
+# 'chrgngDoorPosSts'
+# 'chrgngRmnngTime'
+# 'chrgngRmnngTimeV'
+# 'chrgngSpdngTime'
+# 'chrgngSpdngTimeV'
+# 'clstrElecRngToEPT'
+# 'disChrgngRmnngTime'
+# 'disChrgngRmnngTimeV'
+# 'imcuChrgngEstdElecRng'
+# 'imcuChrgngEstdElecRngV'
+# 'imcuDschrgngEstdElecRng'
+# 'imcuDschrgngEstdElecRngV'
+# 'imcuVehElecRng'
+# 'imcuVehElecRngV'
+# 'onBdChrgrAltrCrntInptCrnt'
+# 'onBdChrgrAltrCrntInptVol'
+
+        # flat_status =  flatdict.FlatDict((charge_status.rvsChargeStatus.__dict__), delimiter='.')
+        # pprint.pprint(dict(flat_status).items())
+        # for k,v in dict(flat_status).items():print(k,':', v )
+# 'chargingDuration'
+# 'chargingElectricityPhase'
+# 'chargingGunState'
+# 'chargingPileID'
+# 'chargingPileSupplier'
+# 'chargingType'
+# 'endTime'
+# 'extendedData1'
+# 'extendedData2'
+# 'extendedData3'
+# 'extendedData4'
+# 'fotaLowestVoltage'
+# 'fuelRangeElec'
+# 'lastChargeEndingPower'
+# 'mileage'
+# 'mileageOfDay'
+# 'mileageSinceLastCharge'
+# 'powerUsageOfDay'
+# 'powerUsageSinceLastCharge'
+# 'realtimePower'
+# 'startTime'
+# 'staticEnergyConsumption'
+# 'totalBatteryCapacity'
+# 'workingCurrent'
+# 'workingVoltage'
+
         return False
 
-    # flat_status =  flatdict.FlatDict((status.__dict__), delimiter='.')
-    # pprint.pprint(flat_status)
 
-    # for k,v in dict(flat_status).items():pprint.pprint(k )
