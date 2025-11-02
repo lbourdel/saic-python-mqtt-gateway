@@ -1,0 +1,9 @@
+apscheduler
+saic_ismart_client_ng
+inflection
+gmqtt
+pytz
+gspread
+oauth2client
+google-api-python-client
+flatdict

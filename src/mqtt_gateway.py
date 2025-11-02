@@ -203,6 +203,14 @@ class MqttGateway(MqttCommandListener, VehicleHandlerLocator):
             # just make sure that we don't set the is_charging flag too early
             # and that it is immediately overwritten by a running vehicle state request
             await asyncio.sleep(delay=3.0)
+            # lbr
+            # LOG.info('Force SOC to 80%...')
+            # target_battery_code = TargetBatteryCode.from_percentage(int("80"))
+            # await self.saic_api.set_target_battery_soc(self.vin_info.vin, target_soc=target_battery_code)
+            # vehicle_handler.vehicle_state.update_target_soc(target_battery_code)
+            # LOG.info('Force SOC to 80% OK...')
+            # end lbr
+
             vehicle_handler.vehicle_state.set_is_charging(True)
         else:
             LOG.debug(f"Charging detected for unknown vin {vin}")

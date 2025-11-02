@@ -89,7 +89,7 @@ class ChrgMgmtDataPublisher(
         target_soc: TargetBatteryCode | None = None
         if raw_target_soc is not None:
             try:
-                target_soc = TargetBatteryCode(raw_target_soc)
+                target_soc = TargetBatteryCode(raw_target_soc) # P_80
             except ValueError:
                 LOG.warning(f"Invalid target SOC received: {raw_target_soc}")
 

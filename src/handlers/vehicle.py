@@ -37,11 +37,15 @@ if TYPE_CHECKING:
     )
     from vehicle import VehicleState
     from vehicle_info import VehicleInfo
+# LBR
+import mygsheet
 
+# END
 LOG = logging.getLogger(__name__)
 
 
-class VehicleHandler:
+# class VehicleHandler:
+class VehicleHandler(mygsheet.mygsheet):
     def __init__(
         self,
         config: Configuration,
@@ -51,6 +55,9 @@ class VehicleHandler:
         vin_info: VehicleInfo,
         vehicle_state: VehicleState,
     ) -> None:
+        # LBR
+        mygsheet.mygsheet.__init__(self)
+        # END LBR
         self.configuration = config
         self.relogin_handler = relogin_handler
         self.saic_api = saicapi
@@ -248,6 +255,12 @@ class VehicleHandler:
     async def __refresh_abrp(
         self, charge_status: ChrgMgmtDataResp | None, vehicle_status: VehicleStatusResp
     ) -> None:
+        # LBR
+        # print("LBR vehicle_status", vehicle_status)
+        # print("LBR charge_status",charge_status)
+        if(self.save_mydata(vehicle_status, charge_status)):
+            LOG.info("LBR save to excel drive...")
+        # END LBR
         abrp_refreshed, abrp_response = await self.abrp_api.update_abrp(
             vehicle_status, charge_status
         )
